@@ -1,0 +1,106 @@
+import boto3
+import pandas as pd
+import json
+import numpy as np
+from sklearn.ensemble import IsolationForest
+import smtplib
+from email.mime.text import MIMEText
+
+# Initialize AWS session
+session = boto3.Session(profile_name="default")  # Change if using another AWS profile
+client = session.client('cloudtrail')
+
+# 🔹 1️⃣ Fetch CloudTrail Logs for Security Analysis
+def fetch_cloudtrail_logs():
+    events = client.lookup_events(
+        LookupAttributes=[{'AttributeKey': 'EventName', 'AttributeValue': 'ConsoleLogin'}],
+        MaxResults=50
+    )
+
+    event_data = []
+    for event in events['Events']:
+        event_details = json.loads(event['CloudTrailEvent'])
+        event_data.append({
+            "EventTime": event['EventTime'],
+            "UserName": event_details.get("userIdentity", {}).get("userName", "Unknown"),
+            "SourceIP": event_details.get("sourceIPAddress", "Unknown"),
+            "EventName": event['EventName'],
+            "Response": event_details.get("responseElements", {}).get("ConsoleLogin", "Unknown")
+        })
+
+    df = pd.DataFrame(event_data)
+    df.to_csv("cloudtrail_security_report.csv", index=False)
+    print("✅ CloudTrail Security Report Generated: cloudtrail_security_report.csv")
+    return df
+
+# 🔹 2️⃣ Detect Privilege Escalations in IAM
+def fetch_iam_events():
+    iam_events = client.lookup_events(
+        LookupAttributes=[{'AttributeKey': 'EventName', 'AttributeValue': 'CreateRole'}],
+        MaxResults=50
+    )
+
+    iam_data = []
+    for event in iam_events['Events']:
+        event_details = json.loads(event['CloudTrailEvent'])
+        iam_data.append({
+            "EventTime": event['EventTime'],
+            "UserName": event_details.get("userIdentity", {}).get("userName", "Unknown"),
+            "SourceIP": event_details.get("sourceIPAddress", "Unknown"),
+            "EventName": event['EventName'],
+            "RoleName": event_details.get("requestParameters", {}).get("roleName", "Unknown"),
+            "PolicyChanges": json.dumps(event_details.get("requestParameters", {}).get("assumeRolePolicyDocument", "Unknown"))
+        })
+
+    iam_df = pd.DataFrame(iam_data)
+    suspicious_roles = iam_df[iam_df["UserName"] == "Unknown"]  # Example: Unidentified user role changes
+    suspicious_roles.to_csv("iam_role_security_report.csv", index=False)
+    print("✅ IAM Security Report Generated: iam_role_security_report.csv")
+    return suspicious_roles
+
+# 🔹 3️⃣ Machine Learning-Based Anomaly Detection
+def detect_anomalies():
+    df = pd.read_csv("cloudtrail_security_report.csv")
+    df["EventTime"] = pd.to_datetime(df["EventTime"]).astype(int) // 10**9
+
+    features = df[["EventTime"]].values
+    model = IsolationForest(n_estimators=100, contamination=0.1, random_state=42)
+    df["Anomaly"] = model.fit_predict(features)
+
+    anomalies = df[df["Anomaly"] == -1]
+    anomalies.to_csv("anomaly_report.csv", index=False)
+    print("✅ Anomaly Report Generated: anomaly_report.csv")
+    return anomalies
+
+# 🔹 4️⃣ Sending Email Alerts for Security Threats
+def send_security_alert():
+    anomaly_df = pd.read_csv("anomaly_report.csv")
+
+    if not anomaly_df.empty:
+        sender_email = "your_email@gmail.com"
+        receiver_email = "security_team@example.com"
+        password = "your_email_password"
+
+        subject = "🚨 Security Alert: Anomalous Activity Detected!"
+        body = f"Suspicious activity detected in AWS CloudTrail logs.\n\nDetails:\n{anomaly_df.to_string()}"
+
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = sender_email
+        msg["To"] = receiver_email
+
+        try:
+            server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+            server.login(sender_email, password)
+            server.sendmail(sender_email, receiver_email, msg.as_string())
+            server.quit()
+            print("✅ Security Alert Email Sent Successfully!")
+        except Exception as e:
+            print(f"⚠️ Failed to Send Email: {e}")
+
+# 🔹 5️⃣ Main Execution
+if __name__ == "__main__":
+    fetch_cloudtrail_logs()
+    fetch_iam_events()
+    detect_anomalies()
+    send_security_alert()
